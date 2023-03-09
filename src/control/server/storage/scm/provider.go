@@ -1,5 +1,5 @@
 //
-// (C) Copyright 2019-2022 Intel Corporation.
+// (C) Copyright 2019-2023 Intel Corporation.
 //
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 //
@@ -110,6 +110,12 @@ func NewProvider(log logging.Logger, backend Backend, sys SystemProvider, mounte
 
 // Scan attempts to scan the system for SCM storage components.
 func (p *Provider) Scan(req storage.ScmScanRequest) (_ *storage.ScmScanResponse, err error) {
+	// Don't perform a SCM scan.
+	return &storage.ScmScanResponse{
+		Modules:    storage.ScmModules{},
+		Namespaces: storage.ScmNamespaces{},
+	}, nil
+
 	msg := fmt.Sprintf("scm backend scan: req %+v", req)
 	defer func() {
 		if err != nil {
