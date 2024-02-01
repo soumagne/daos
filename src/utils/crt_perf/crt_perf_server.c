@@ -4,10 +4,22 @@
  * SPDX-License-Identifier: BSD-2-Clause-Patent
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
-#include "perf_test.h"
+#endif
+#include "crt_perf.h"
 
 #include <sched.h>
+
+/********************/
+/* Local Prototypes */
+/********************/
+
+static int
+crt_perf_loop_thread_set_affinity(struct crt_perf_context_info *info);
+
+static int
+crt_perf_loop(struct crt_perf_context_info *info);
 
 static void *
 crt_perf_loop_thread(void *arg)
@@ -59,7 +71,7 @@ crt_perf_loop_thread_set_affinity(struct crt_perf_context_info *info)
 		}
 	}
 
-	rc = pthread_setaffinity_np(hg_thread_self(), sizeof(new_cpu_set), &new_cpu_set);
+	rc = pthread_setaffinity_np(pthread_self(), sizeof(new_cpu_set), &new_cpu_set);
 	if (rc != 0) {
 		DS_ERROR(rc, "pthread_setaffinity_np() failed");
 		goto error;

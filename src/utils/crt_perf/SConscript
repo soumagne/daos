@@ -1,0 +1,27 @@
+# (C) Copyright 2021 Intel Corporation.
+#
+# SPDX-License-Identifier: BSD-2-Clause-Patent
+#
+"""CART perf utility"""
+
+
+def scons():
+    """Execute build"""
+    Import('env')
+
+    tenv = env.Clone()
+    tenv.require('mercury')
+
+    libs = ['cart', 'gurt', 'mercury']
+
+    crt_rate_src = ['crt_rate.c', tenv.Object('crt_perf.c')]
+    crt_perf_server_src = ['crt_perf_server.c', tenv.Object('crt_perf.c')]
+
+    crt_rate = tenv.d_program('crt_rate', crt_rate_src, LIBS=libs)
+    crt_perf_server = tenv.d_program('crt_perf_server', crt_perf_server_src, LIBS=libs)
+
+    tenv.Install('$PREFIX/bin', [crt_rate, crt_perf_server])
+
+
+if __name__ == "SCons.Script":
+    scons()

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause-Patent
  */
 
-#ifndef __PERF_TEST_H__
-#define __PERF_TEST_H__
+#ifndef __CRT_PERF_H__
+#define __CRT_PERF_H__
 
 #include <cart/api.h>
 #include <gurt/atomic.h>
@@ -35,7 +35,7 @@ struct crt_perf_opts {
 	bool   busy_wait;
 	bool   bidir;
 	bool   verify;
-	bool   mbps
+	bool   mbps;
 };
 
 struct crt_mpi_info {
@@ -117,4 +117,4 @@ crt_perf_barrier(const struct crt_perf_info *perf_info);
 int
 crt_perf_send_done(const struct crt_perf_info *perf_info, struct crt_perf_context_info *info);
 
-#endif /* __PERF_TEST_H__ */
+#endif /* __CRT_PERF_H__ */

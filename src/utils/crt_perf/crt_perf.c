@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause-Patent
  */
 
-#include "perf_test.h"
+#include "crt_perf.h"
 
+#include <mercury_proc.h> /* for hg_proc_save_ptr() */
 #include <unistd.h>
 #include <getopt.h>
 
@@ -22,7 +23,7 @@
 #define NDIGITS           2
 #define NWIDTH            27
 
-#define CRT_PERF_GROUP_ID "perf_test"
+#define CRT_PERF_GROUP_ID "crt_perf"
 
 /************************************/
 /* Local Type and Struct Definition */
@@ -52,7 +53,7 @@ static void
 crt_perf_init_data(void *buf, size_t buf_size);
 
 static int
-crt_perf_proc_iovec(crt_proc_t proc, crt_proc_op_t proc_op, struct iovec *iov);
+crt_perf_proc_iovec(crt_proc_t proc, void *data);
 
 static void
 crt_perf_rpc_rate_init_cb(crt_rpc_t *rpc);
@@ -360,10 +361,19 @@ crt_perf_init_data(void *buf, size_t buf_size)
 }
 
 static int
-crt_proc_iovec(crt_proc_t proc, crt_proc_op_t proc_op, struct iovec *iov)
+crt_perf_proc_iovec(crt_proc_t proc, void *data)
 {
-	uint32_t len = (uint32_t)iov->iov_len;
-	int      rc;
+	struct iovec *iov = (struct iovec *)data;
+	crt_proc_op_t proc_op;
+	uint32_t      len = (uint32_t)iov->iov_len;
+	int           rc;
+
+	if (proc == NULL || iov == NULL)
+		return -DER_INVAL;
+
+	rc = crt_proc_get_op(proc, &proc_op);
+	if (unlikely(rc))
+		return rc;
 
 	if (FREEING(proc_op)) {
 		iov->iov_base = NULL;
@@ -411,7 +421,7 @@ crt_perf_rpc_rate_init_cb(crt_rpc_t *rpc)
 {
 	size_t                        page_size = sysconf(_SC_PAGE_SIZE);
 	const struct crt_perf_opts   *opts;
-	struct crt_perf_context_info *info;
+	struct crt_perf_context_info *info = NULL;
 	int                           ctx_idx;
 	int                           rc;
 
@@ -451,13 +461,15 @@ crt_perf_rpc_rate_init_cb(crt_rpc_t *rpc)
 	return;
 
 error:
-	if (info->rpc_buf != NULL) {
-		free(info->rpc_buf);
-		info->rpc_buf = NULL;
-	}
-	if (info->rpc_verify_buf != NULL) {
-		free(info->rpc_verify_buf);
-		info->rpc_verify_buf = NULL;
+	if (info != NULL) {
+		if (info->rpc_buf != NULL) {
+			free(info->rpc_buf);
+			info->rpc_buf = NULL;
+		}
+		if (info->rpc_verify_buf != NULL) {
+			free(info->rpc_verify_buf);
+			info->rpc_verify_buf = NULL;
+		}
 	}
 
 	return;
@@ -466,18 +478,18 @@ error:
 static void
 crt_perf_rpc_rate_cb(crt_rpc_t *rpc)
 {
-	const struct crt_perf_opts   *opts;
-	struct crt_perf_context_info *info;
-	struct iovec                 *in_iov;
-	int                           ctx_idx;
-	int                           rc;
+	const struct crt_perf_opts *opts;
+	// struct crt_perf_context_info *info;
+	struct iovec               *in_iov;
+	// int                           ctx_idx;
+	int                         rc;
 
-	rc = crt_context_idx(rpc->cr_ctx, &ctx_idx);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_context_idx() failed");
-		goto error;
-	}
-	info = (struct crt_perf_context_info *)&perf_info_g->context_info[ctx_idx];
+	// rc = crt_context_idx(rpc->cr_ctx, &ctx_idx);
+	// if (rc != 0) {
+	// 	DL_ERROR(rc, "crt_context_idx() failed");
+	// 	goto error;
+	// }
+	// info = (struct crt_perf_context_info *)&perf_info_g->context_info[ctx_idx];
 	opts = &perf_info_g->opts;
 
 	/* Get input struct */
@@ -523,7 +535,6 @@ error:
 static void
 crt_perf_done_cb(crt_rpc_t *rpc)
 {
-	const struct crt_perf_opts   *opts;
 	struct crt_perf_context_info *info;
 	int                           ctx_idx;
 	int                           rc;
@@ -534,7 +545,6 @@ crt_perf_done_cb(crt_rpc_t *rpc)
 		goto error;
 	}
 	info = (struct crt_perf_context_info *)&perf_info_g->context_info[ctx_idx];
-	opts = &perf_info_g->opts;
 
 	/* Set done for context data */
 	info->done = true;
@@ -626,13 +636,13 @@ crt_perf_init(int argc, char *argv[], bool listen, struct crt_perf_info *info)
 	if (listen) {
 		rc = crt_group_config_save(NULL, true);
 		if (rc != 0) {
-			D_ERROR("crt_group_config_save() failed", rc);
+			DL_ERROR(rc, "crt_group_config_save() failed");
 			goto error;
 		}
 	} else {
 		rc = crt_group_attach(CRT_PERF_GROUP_ID, &info->ep_group);
 		if (rc != 0) {
-			D_ERROR("crt_group_attach() failed", rc);
+			DL_ERROR(rc, "crt_group_attach() failed");
 			goto error;
 		}
 	}

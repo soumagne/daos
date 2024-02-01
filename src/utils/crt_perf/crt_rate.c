@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: BSD-2-Clause-Patent
  */
 
-#include "perf_test.h"
+#include "crt_perf.h"
+
+/****************/
+/* Local Macros */
+/****************/
 
 #define BENCHMARK_NAME "RPC rate"
 
@@ -26,7 +30,6 @@ crt_perf_run(const struct crt_perf_info *perf_info, struct crt_perf_context_info
 	struct timespec             t1, t2;
 	size_t                      i;
 	int                         rc;
-	crt_rpc_t                 **requests;
 	const struct crt_perf_opts *opts = &perf_info->opts;
 
 	/* Warm up for RPC */
@@ -51,17 +54,17 @@ crt_perf_run(const struct crt_perf_info *perf_info, struct crt_perf_context_info
 			struct iovec *in_iov;
 
 			rc = crt_req_create(info->context, &target_ep, CRT_PERF_RATE_ID,
-					    &requests[j]);
+					    &info->requests[j]);
 			if (rc != 0) {
 				DL_ERROR(rc, "crt_req_create() failed");
 				goto error;
 			}
 
-			in_iov           = crt_req_get(requests[j]);
+			in_iov           = crt_req_get(info->requests[j]);
 			in_iov->iov_base = info->rpc_buf;
 			in_iov->iov_len  = buf_size;
 
-			rc = crt_req_send(requests[j], crt_perf_request_complete, &args);
+			rc = crt_req_send(info->requests[j], crt_perf_request_complete, &args);
 			if (rc != 0) {
 				DL_ERROR(rc, "crt_req_send() failed");
 				goto error;
@@ -125,7 +128,7 @@ main(int argc, char **argv)
 	int                           rc;
 
 	/* Initialize the interface */
-	rc = crt_perf_init(argc, argv, false, &info);
+	rc = crt_perf_init(argc, argv, false, &perf_info);
 	if (rc != 0) {
 		DL_ERROR(rc, "crt_perf_init() failed");
 		goto error;
@@ -168,12 +171,12 @@ main(int argc, char **argv)
 	if (perf_info.mpi_info.rank == 0)
 		crt_perf_send_done(&perf_info, info);
 
-	crt_perf_cleanup(&info);
+	crt_perf_cleanup(&perf_info);
 
 	return EXIT_SUCCESS;
 
 error:
-	crt_perf_cleanup(&info);
+	crt_perf_cleanup(&perf_info);
 
 	return EXIT_FAILURE;
 }
