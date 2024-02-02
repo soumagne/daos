@@ -55,28 +55,23 @@ crt_perf_run(const struct crt_perf_info *perf_info, struct crt_perf_context_info
 
 			rc = crt_req_create(info->context, &target_ep, CRT_PERF_RATE_ID,
 					    &info->requests[j]);
-			if (rc != 0) {
-				DL_ERROR(rc, "crt_req_create() failed");
-				goto error;
-			}
+			CRT_PERF_CHECK_D_ERROR(error, rc, "could not create request");
 
 			in_iov           = crt_req_get(info->requests[j]);
 			in_iov->iov_base = info->rpc_buf;
 			in_iov->iov_len  = buf_size;
 
 			rc = crt_req_send(info->requests[j], crt_perf_request_complete, &args);
-			if (rc != 0) {
-				DL_ERROR(rc, "crt_req_send() failed");
-				goto error;
-			}
+			CRT_PERF_CHECK_D_ERROR(error, rc,
+					       "could not send request to %" PRIu32 ":%" PRIu32,
+					       target_ep.ep_rank, target_ep.ep_tag);
 		}
 
 		while (!args.done) {
 			rc = crt_progress(info->context, 1000 * 1000);
-			if (rc != 0 && rc != -DER_TIMEDOUT) {
-				DL_ERROR(rc, "crt_progress() failed");
-				goto error;
-			}
+			if (rc == -DER_TIMEDOUT)
+				continue;
+			CRT_PERF_CHECK_D_ERROR(error, rc, "could not make progress");
 		}
 	}
 
@@ -101,17 +96,11 @@ crt_perf_rpc_verify(crt_rpc_t *rpc)
 	int           rc;
 
 	out_iov = crt_reply_get(rpc);
-	if (out_iov == NULL) {
-		rc = -DER_INVAL;
-		DL_ERROR(rc, "crt_reply_get() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_ERROR(out_iov == NULL, error, rc, -DER_INVAL,
+			     "could not retrieve rpc response");
 
 	rc = crt_perf_verify_data(out_iov->iov_base, out_iov->iov_len);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_perf_verify_data() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not verify data");
 
 	return 0;
 
@@ -129,18 +118,13 @@ main(int argc, char **argv)
 
 	/* Initialize the interface */
 	rc = crt_perf_init(argc, argv, false, &perf_info);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_perf_init() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not initialize");
+
 	info = &perf_info.context_info[0];
 
 	/* Allocate RPC buffers */
 	rc = crt_perf_rpc_buf_init(&perf_info, info);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_perf_rpc_buf_init() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not init RPC buffers");
 
 	/* Header info */
 	if (perf_info.mpi_info.rank == 0)
@@ -149,10 +133,7 @@ main(int argc, char **argv)
 	/* NULL RPC */
 	if (perf_info.opts.buf_size_min == 0) {
 		rc = crt_perf_run(&perf_info, info, 0, CRT_PERF_LAT_SKIP_SMALL);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_perf_run() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not measure perf for size 0");
 	}
 
 	/* RPC with different sizes */
@@ -161,10 +142,7 @@ main(int argc, char **argv)
 		rc = crt_perf_run(&perf_info, info, size,
 				  (size > CRT_PERF_LARGE_SIZE) ? CRT_PERF_LAT_SKIP_LARGE
 							       : CRT_PERF_LAT_SKIP_SMALL);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_perf_run() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not measure perf for size %zu", size);
 	}
 
 	/* Finalize interface */

@@ -14,16 +14,32 @@
 /* Local Macros */
 /****************/
 
-#define STRING(s)  #s
-#define XSTRING(s) STRING(s)
-#define VERSION_NAME                                                                               \
-	XSTRING(HG_VERSION_MAJOR)                                                                  \
-	"." XSTRING(HG_VERSION_MINOR) "." XSTRING(HG_VERSION_PATCH)
+#define NDIGITS               2
+#define NWIDTH                27
 
-#define NDIGITS           2
-#define NWIDTH            27
+#define CRT_PERF_GROUP_ID     "crt_perf"
 
-#define CRT_PERF_GROUP_ID "crt_perf"
+#define CRT_PERF_BUF_SIZE_MAX (1 << 24)
+#define CRT_PERF_BUF_COUNT    (64)
+
+#define CRT_PERF_OPTS_DEFAULTS                                                                     \
+	((struct crt_perf_opts){.comm         = NULL,                                              \
+				.domain       = NULL,                                              \
+				.protocol     = NULL,                                              \
+				.hostname     = NULL,                                              \
+				.port         = NULL,                                              \
+				.attach_path  = NULL,                                              \
+				.msg_size_max = 0,                                                 \
+				.buf_size_min = 0,                                                 \
+				.buf_size_max = CRT_PERF_BUF_SIZE_MAX,                             \
+				.context_max  = 1,                                                 \
+				.request_max  = 1,                                                 \
+				.buf_count    = CRT_PERF_BUF_COUNT,                                \
+				.loop         = 1,                                                 \
+				.busy_wait    = false,                                             \
+				.bidir        = false,                                             \
+				.verify       = false,                                             \
+				.mbps         = false})
 
 /************************************/
 /* Local Type and Struct Definition */
@@ -35,6 +51,9 @@
 
 static void
 crt_perf_parse_options(int argc, char *argv[], struct crt_perf_opts *opts);
+
+static void
+crt_perf_free_options(struct crt_perf_opts *opts);
 
 static size_t
 crt_perf_parse_size(const char *str);
@@ -54,9 +73,6 @@ crt_perf_init_data(void *buf, size_t buf_size);
 
 static int
 crt_perf_proc_iovec(crt_proc_t proc, void *data);
-
-static void
-crt_perf_rpc_rate_init_cb(crt_rpc_t *rpc);
 
 static void
 crt_perf_rpc_rate_cb(crt_rpc_t *rpc);
@@ -84,7 +100,7 @@ static struct option crt_perf_long_options[] = {
     {"buf_size_min", required_argument, NULL, 'y'},
     {"buf_size_max", required_argument, NULL, 'z'},
     {"buf_count", required_argument, NULL, 'w'},
-    {"handle", required_argument, NULL, 'x'},
+    {"requests", required_argument, NULL, 'x'},
     {"bidirectional", no_argument, NULL, 'B'},
     {"verify", no_argument, NULL, 'v'},
     {"millionbps", no_argument, NULL, 'M'},
@@ -117,12 +133,6 @@ static struct crt_req_format crt_perf_rate_bidir = {
 };
 
 static struct crt_proto_rpc_format crt_perf_rpcs[] = {
-	{
-        .prf_req_fmt = &crt_perf_no_arg,
-		.prf_hdlr    = crt_perf_rpc_rate_init_cb,
-		.prf_co_ops  = NULL,
-		.prf_flags   = 0
-	},
     {
         .prf_req_fmt = &crt_perf_rate,
 		.prf_hdlr    = crt_perf_rpc_rate_cb,
@@ -171,7 +181,7 @@ crt_perf_parse_options(int argc, char *argv[], struct crt_perf_opts *opts)
 			break;
 
 		case 'P': /* port */
-			opts->port = atoi(optarg);
+			opts->port = strdup(optarg);
 			break;
 
 		case 'l': /* loop */
@@ -235,6 +245,35 @@ crt_perf_parse_options(int argc, char *argv[], struct crt_perf_opts *opts)
 	}
 }
 
+static void
+crt_perf_free_options(struct crt_perf_opts *opts)
+{
+	if (opts->comm != NULL) {
+		free(opts->comm);
+		opts->comm = NULL;
+	}
+	if (opts->domain != NULL) {
+		free(opts->domain);
+		opts->domain = NULL;
+	}
+	if (opts->protocol != NULL) {
+		free(opts->protocol);
+		opts->protocol = NULL;
+	}
+	if (opts->hostname != NULL) {
+		free(opts->hostname);
+		opts->hostname = NULL;
+	}
+	if (opts->port != NULL) {
+		free(opts->port);
+		opts->port = NULL;
+	}
+	if (opts->attach_path != NULL) {
+		free(opts->attach_path);
+		opts->attach_path = NULL;
+	}
+}
+
 static size_t
 crt_perf_parse_size(const char *str)
 {
@@ -265,7 +304,7 @@ crt_perf_parse_size(const char *str)
 static void
 crt_perf_usage(const char *execname)
 {
-	printf("usage: %s [OPTIONS] [<class+protocol>]\n", execname);
+	printf("usage: %s [OPTIONS]\n", execname);
 	printf("    OPTIONS\n");
 	printf("    -h, --help           Print a usage message and exit\n");
 	printf("    -c, --comm           Select NA plugin\n"
@@ -279,14 +318,16 @@ crt_perf_usage(const char *execname)
 	       "                         Default: any\n");
 	printf("    -l, --loop           Number of loops (default: 1)\n");
 	printf("    -b, --busy           Busy wait\n");
+	printf("    -C, --contexts       Number of contexts (default: 1)\n");
+	printf("    -Z, --msg_size       Unexpected/expected msg size if different than default\n");
 	printf("    -y  --buf_size_min   Min buffer size (in bytes)\n");
 	printf("    -z, --buf_size_max   Max buffer size (in bytes)\n");
 	printf("    -w  --buf_count      Number of buffers used\n");
+	printf("    -x, --requests       Max number of in-flight requests\n");
+	printf("    -B, --bidirectional  Bidirectional communication\n");
+	printf("    -v, --verify         Verify data\n");
 	printf("    -M, --mbps           Output in MB/s instead of MiB/s\n");
 	printf("    -f, --hostfile       Specify attach info path\n");
-	printf("    -V, --verbose        Print verbose output\n");
-	printf("    -x, --handle        Max number of handles\n");
-	printf("    -B, --bidirectional Bidirectional communication\n");
 }
 
 static int
@@ -297,30 +338,19 @@ crt_perf_context_init(const struct crt_perf_info *perf_info, int context_id,
 	int rc;
 
 	rc = crt_context_create(&info->context);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_context_create() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not create context");
 
 	rc = crt_context_idx(info->context, &ctx_idx);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_context_idx() failed");
-		goto error;
-	}
-	if (context_id != ctx_idx) {
-		rc = -DER_MISMATCH;
-		DL_ERROR(rc, "context_id %d != ctx_idx %d", context_id, ctx_idx);
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not query context index");
+
+	CRT_PERF_CHECK_ERROR(context_id != ctx_idx, error, rc, -DER_MISMATCH,
+			     "context_id %d != ctx_idx %d", context_id, ctx_idx);
 	info->context_id = context_id;
 
 	info->requests = calloc(perf_info->opts.request_max, sizeof(*info->requests));
-	if (info->requests == NULL) {
-		rc = -DER_NOMEM;
-		DL_ERROR(rc, "Could not allocate request array of size %zu",
-			 perf_info->opts.request_max);
-		goto error;
-	}
+	CRT_PERF_CHECK_ERROR(info->requests == NULL, error, rc, -DER_NOMEM,
+			     "Could not allocate request array of size %zu",
+			     perf_info->opts.request_max);
 
 	return 0;
 
@@ -344,10 +374,6 @@ crt_perf_context_cleanup(struct crt_perf_context_info *info)
 		free(info->rpc_buf);
 		info->rpc_buf = NULL;
 	}
-	if (info->rpc_verify_buf != NULL) {
-		free(info->rpc_verify_buf);
-		info->rpc_verify_buf = NULL;
-	}
 }
 
 static void
@@ -368,12 +394,10 @@ crt_perf_proc_iovec(crt_proc_t proc, void *data)
 	uint32_t      len = (uint32_t)iov->iov_len;
 	int           rc;
 
-	if (proc == NULL || iov == NULL)
-		return -DER_INVAL;
+	CRT_PERF_CHECK_ERROR(proc == NULL || iov == NULL, error, rc, -DER_INVAL, "NULL arguments");
 
 	rc = crt_proc_get_op(proc, &proc_op);
-	if (unlikely(rc))
-		return rc;
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not get proc op");
 
 	if (FREEING(proc_op)) {
 		iov->iov_base = NULL;
@@ -382,10 +406,7 @@ crt_perf_proc_iovec(crt_proc_t proc, void *data)
 	}
 
 	rc = crt_proc_uint32_t(proc, proc_op, &len);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_proc_uint32_t() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not proc len");
 
 	if (len == 0)
 		return 0;
@@ -397,17 +418,11 @@ crt_perf_proc_iovec(crt_proc_t proc, void *data)
 		 * Just point at memory in request buffer instead.
 		 */
 		iov->iov_base = hg_proc_save_ptr(proc, iov->iov_len);
-		if (iov->iov_base == NULL) {
-			rc = -DER_INVAL;
-			DL_ERROR(rc, "hg_proc_save_ptr() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_ERROR(iov->iov_base == NULL, error, rc, -DER_INVAL,
+				     "could not proc save ptr");
 	} else { /* ENCODING(proc_op) */
 		rc = crt_proc_memcpy(proc, proc_op, iov->iov_base, iov->iov_len);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_proc_memcpy() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not proc memcpy");
 	}
 
 	return 0;
@@ -417,114 +432,36 @@ error:
 }
 
 static void
-crt_perf_rpc_rate_init_cb(crt_rpc_t *rpc)
-{
-	size_t                        page_size = sysconf(_SC_PAGE_SIZE);
-	const struct crt_perf_opts   *opts;
-	struct crt_perf_context_info *info = NULL;
-	int                           ctx_idx;
-	int                           rc;
-
-	rc = crt_context_idx(rpc->cr_ctx, &ctx_idx);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_context_idx() failed");
-		goto error;
-	}
-	info = (struct crt_perf_context_info *)&perf_info_g->context_info[ctx_idx];
-	opts = &perf_info_g->opts;
-
-	/* Prepare buf */
-	info->rpc_buf = aligned_alloc(page_size, opts->buf_size_max);
-	if (info->rpc_buf == NULL) {
-		rc = -DER_NOMEM;
-		DL_ERROR(rc, "aligned_alloc(%zu, %zu) failed", page_size, opts->buf_size_max);
-		goto error;
-	}
-
-	if (opts->verify) {
-		info->rpc_verify_buf = aligned_alloc(page_size, opts->buf_size_max);
-		if (info->rpc_verify_buf == NULL) {
-			rc = -DER_NOMEM;
-			DL_ERROR(rc, "aligned_alloc(%zu, %zu) failed", page_size,
-				 opts->buf_size_max);
-			goto error;
-		}
-	}
-
-	/* Send response back */
-	rc = crt_reply_send(rpc);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_reply_send() failed");
-		goto error;
-	}
-
-	return;
-
-error:
-	if (info != NULL) {
-		if (info->rpc_buf != NULL) {
-			free(info->rpc_buf);
-			info->rpc_buf = NULL;
-		}
-		if (info->rpc_verify_buf != NULL) {
-			free(info->rpc_verify_buf);
-			info->rpc_verify_buf = NULL;
-		}
-	}
-
-	return;
-}
-
-static void
 crt_perf_rpc_rate_cb(crt_rpc_t *rpc)
 {
 	const struct crt_perf_opts *opts;
-	// struct crt_perf_context_info *info;
 	struct iovec               *in_iov;
-	// int                           ctx_idx;
 	int                         rc;
 
-	// rc = crt_context_idx(rpc->cr_ctx, &ctx_idx);
-	// if (rc != 0) {
-	// 	DL_ERROR(rc, "crt_context_idx() failed");
-	// 	goto error;
-	// }
-	// info = (struct crt_perf_context_info *)&perf_info_g->context_info[ctx_idx];
 	opts = &perf_info_g->opts;
 
 	/* Get input struct */
 	in_iov = crt_req_get(rpc);
-	if (in_iov == NULL) {
-		rc = -DER_INVAL;
-		DL_ERROR(rc, "crt_req_get() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_ERROR(in_iov == NULL, error, rc, -DER_INVAL,
+			     "could not retrieve rpc request");
 
 	if (opts->verify) {
 		rc = crt_perf_verify_data(in_iov->iov_base, in_iov->iov_len);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_perf_verify_data() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not verify data");
 	}
 
 	/* Send response back */
 	if (opts->bidir) {
 		struct iovec *out_iov = (struct iovec *)crt_reply_get(rpc);
-		if (out_iov == NULL) {
-			rc = -DER_INVAL;
-			DL_ERROR(rc, "crt_reply_get() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_ERROR(out_iov == NULL, error, rc, -DER_INVAL,
+				     "could not retrieve rpc response");
+
 		out_iov->iov_base = in_iov->iov_base;
 		out_iov->iov_len  = in_iov->iov_len;
 	}
 
 	rc = crt_reply_send(rpc);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_reply_send() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not send response");
 
 	return;
 
@@ -540,10 +477,8 @@ crt_perf_done_cb(crt_rpc_t *rpc)
 	int                           rc;
 
 	rc = crt_context_idx(rpc->cr_ctx, &ctx_idx);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_context_idx() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not query context index");
+
 	info = (struct crt_perf_context_info *)&perf_info_g->context_info[ctx_idx];
 
 	/* Set done for context data */
@@ -551,10 +486,7 @@ crt_perf_done_cb(crt_rpc_t *rpc)
 
 	/* Send response back */
 	rc = crt_reply_send(rpc);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_reply_send() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not send response");
 
 	return;
 
@@ -571,80 +503,79 @@ crt_perf_init(int argc, char *argv[], bool listen, struct crt_perf_info *info)
 	size_t                  i;
 	int                     rc;
 
-	rc = d_log_init();
-	if (rc != 0) {
-		DL_ERROR(rc, "d_log_init() failed");
-		goto error;
-	}
+	/* Clear all info and set defaults */
+	memset(info, 0, sizeof(*info));
+	info->opts = CRT_PERF_OPTS_DEFAULTS;
 
-	// TODO parse options
+	rc = d_log_init();
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not init log");
+
+	/* Init MPI (if available) */
+	crt_perf_mpi_init(&info->mpi_info);
+
+	/* Parse user options */
 	crt_perf_parse_options(argc, argv, &info->opts);
-	// crt_init_options.cio_provider = ;
-	// crt_init_options.cio_domain   = ;
-	// crt_init_options.cio_port     = ;
-	// crt_init_options.cio_max_expected_size = ;
+
+	memset(&crt_init_options, 0, sizeof(crt_init_options));
+	crt_init_options.cio_provider  = info->opts.protocol;
+	crt_init_options.cio_interface = info->opts.hostname;
+	crt_init_options.cio_domain    = info->opts.domain;
+	crt_init_options.cio_port      = info->opts.port;
+	if (info->opts.msg_size_max) {
+		crt_init_options.cio_max_expected_size   = info->opts.msg_size_max;
+		crt_init_options.cio_max_unexpected_size = info->opts.msg_size_max;
+		crt_init_options.cio_use_expected_size   = true;
+		crt_init_options.cio_use_unexpected_size = true;
+	}
 
 	if (listen)
 		crt_init_flags |= CRT_FLAG_BIT_SERVER | CRT_FLAG_BIT_AUTO_SWIM_DISABLE;
 	rc = crt_init_opt(CRT_PERF_GROUP_ID, crt_init_flags, &crt_init_options);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_init() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not init CART");
 
 	if (attach_info_path) {
 		rc = crt_group_config_path_set(attach_info_path);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_group_config_path_set() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not set attach info path to %s",
+				       attach_info_path);
 	}
 
 	if (listen) {
 		rc = crt_rank_self_set(info->mpi_info.rank, 1);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_rank_self_set() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not set self rank to %d",
+				       info->mpi_info.rank);
 	}
 
 	if (info->opts.bidir) {
-		crt_perf_rpcs[1].prf_req_fmt = &crt_perf_rate_bidir;
+		crt_perf_rpcs[0].prf_req_fmt = &crt_perf_rate_bidir;
 	}
 
 	rc = crt_proto_register(&crt_perf_protocol);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_proto_register() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not register protocol");
 
 	info->context_info = (struct crt_perf_context_info *)calloc(info->opts.context_max,
 								    sizeof(*info->context_info));
-	if (info->context_info == NULL) {
-		rc = -DER_NOMEM;
-		DL_ERROR(rc, "Could not allocate context info");
-		goto error;
-	}
+	CRT_PERF_CHECK_ERROR(info->context_info == NULL, error, rc, -DER_NOMEM,
+			     "could not allocate context info array for %zu contexts",
+			     info->opts.context_max);
+
 	for (i = 0; i < info->opts.context_max; i++) {
 		rc = crt_perf_context_init(info, i, &info->context_info[i]);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_perf_context_init() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not init context info");
 	}
 
 	if (listen) {
 		rc = crt_group_config_save(NULL, true);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_group_config_save() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not save group config");
 	} else {
 		rc = crt_group_attach(CRT_PERF_GROUP_ID, &info->ep_group);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_group_attach() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not attach to group %s",
+				       CRT_PERF_GROUP_ID);
+
+		rc = crt_group_size(info->ep_group, &info->ep_ranks);
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not query group size");
+		printf("# %" PRIu32 " target rank(s) read:\n", info->ep_ranks);
+
+		info->ep_tags = 1;
 	}
 
 	perf_info_g = info;
@@ -674,6 +605,8 @@ crt_perf_cleanup(struct crt_perf_info *info)
 
 	(void)crt_finalize();
 
+	crt_perf_free_options(&info->opts);
+
 	d_log_fini();
 
 	perf_info_g = NULL;
@@ -684,71 +617,15 @@ crt_perf_rpc_buf_init(const struct crt_perf_info *perf_info, struct crt_perf_con
 {
 	const struct crt_perf_opts *opts      = &perf_info->opts;
 	size_t                      page_size = sysconf(_SC_PAGE_SIZE);
-	bool                        barrier   = false;
 	int                         rc;
 
 	/* Prepare buf */
 	info->rpc_buf = aligned_alloc(page_size, opts->buf_size_max);
-	if (info->rpc_buf == NULL) {
-		rc = -DER_NOMEM;
-		DL_ERROR(rc, "aligned_alloc(%zu, %zu) failed", page_size, opts->buf_size_max);
-		goto error;
-	}
+	CRT_PERF_CHECK_ERROR(info->rpc_buf == NULL, error, rc, -DER_NOMEM,
+			     "aligned_alloc(%zu, %zu) failed", page_size, opts->buf_size_max);
 
 	/* Init data */
 	crt_perf_init_data(info->rpc_buf, opts->buf_size_max);
-
-	if (opts->verify) {
-		info->rpc_verify_buf = aligned_alloc(page_size, opts->buf_size_max);
-		if (info->rpc_verify_buf == NULL) {
-			rc = -DER_NOMEM;
-			DL_ERROR(rc, "aligned_alloc(%zu, %zu) failed", page_size,
-				 opts->buf_size_max);
-			goto error;
-		}
-	}
-
-	barrier = true;
-
-	if (perf_info->mpi_info.rank == 0) {
-		size_t ep_rank, ep_tag;
-
-		for (ep_rank = 0; ep_rank < perf_info->ep_rank_max; ep_rank++) {
-			for (ep_tag = 0; ep_tag < perf_info->ep_tag_max; ep_tag++) {
-				struct crt_perf_request args      = {.expected_count = 1,
-								     .complete_count = 0,
-								     .rc             = 0,
-								     .done           = false,
-								     .cb             = NULL};
-				crt_endpoint_t          target_ep = {.ep_grp  = perf_info->ep_group,
-								     .ep_rank = ep_rank,
-								     .ep_tag  = ep_tag};
-				crt_rpc_t              *request;
-
-				rc = crt_req_create(info->context, &target_ep,
-						    CRT_PERF_RATE_INIT_ID, &request);
-				if (rc != 0) {
-					DL_ERROR(rc, "crt_req_create() failed");
-					goto error;
-				}
-
-				rc = crt_req_send(request, crt_perf_request_complete, &args);
-				if (rc != 0) {
-					DL_ERROR(rc, "crt_req_send() failed");
-					goto error;
-				}
-
-				while (!args.done) {
-					rc = crt_progress(info->context, 1000 * 1000);
-					if (rc != 0 && rc != -DER_TIMEDOUT) {
-						DL_ERROR(rc, "crt_progress() failed");
-						goto error;
-					}
-				}
-			}
-		}
-	}
-	crt_perf_barrier(perf_info);
 
 	return 0;
 
@@ -757,12 +634,6 @@ error:
 		free(info->rpc_buf);
 		info->rpc_buf = NULL;
 	}
-	if (info->rpc_verify_buf != NULL) {
-		free(info->rpc_verify_buf);
-		info->rpc_verify_buf = NULL;
-	}
-	if (barrier)
-		crt_perf_barrier(perf_info);
 
 	return rc;
 }
@@ -773,14 +644,14 @@ crt_perf_print_header_lat(const struct crt_perf_info         *perf_info,
 {
 	const struct crt_perf_opts *opts = &perf_info->opts;
 
-	printf("# %s v%s\n", benchmark, VERSION_NAME);
+	printf("# CRT %s v" CART_VERSION "\n", benchmark);
 	printf("# %d client process(es)\n", perf_info->mpi_info.size);
-	printf("# Loop %d times from size %zu to %zu byte(s) with %zu handle(s) "
+	printf("# Loop %d times from size %zu to %zu byte(s) with %zu request(s) "
 	       "in-flight\n",
 	       opts->loop, opts->buf_size_min, opts->buf_size_max, opts->request_max);
 	if (opts->request_max * (size_t)perf_info->mpi_info.size <
-	    perf_info->ep_rank_max * perf_info->ep_tag_max)
-		printf("# WARNING number of handles in flight less than number of "
+	    (size_t)(perf_info->ep_ranks * perf_info->ep_tags))
+		printf("# WARNING number of requests in flight less than number of "
 		       "targets\n");
 	if (opts->verify)
 		printf("# WARNING verifying data, output will be slower\n");
@@ -812,14 +683,10 @@ crt_perf_verify_data(const void *buf, size_t buf_size)
 	int         rc;
 
 	for (i = 0; i < buf_size; i++) {
-		if (buf_ptr[i] != (char)i) {
-			rc = -DER_INVAL;
-			DL_ERROR(rc,
-				 "Error detected in bulk transfer, buf[%zu] = %d, "
-				 "was expecting %d!",
-				 i, buf_ptr[i], (char)i);
-			goto error;
-		}
+		CRT_PERF_CHECK_ERROR(buf_ptr[i] != (char)i, error, rc, -DER_INVAL,
+				     "Error detected in bulk transfer, buf[%zu] = %d, "
+				     "was expecting %d!",
+				     i, buf_ptr[i], (char)i);
 	}
 
 	return 0;
@@ -833,14 +700,14 @@ crt_perf_request_complete(const struct crt_cb_info *cb_info)
 {
 	struct crt_perf_request *info = (struct crt_perf_request *)cb_info->cci_arg;
 
-	if (cb_info->cci_rc != 0) {
-		DL_ERROR(cb_info->cci_rc, "crt_perf_request_complete() failed");
-		info->rc = cb_info->cci_rc;
-	}
+	CRT_PERF_CHECK_ERROR(cb_info->cci_rc != 0, out, info->rc, cb_info->cci_rc,
+			     "callback failed");
+
 	if (info->cb) {
 		info->rc = info->cb(cb_info->cci_rpc);
 	}
 
+out:
 	if ((++info->complete_count) == info->expected_count)
 		info->done = true;
 }
@@ -848,11 +715,11 @@ crt_perf_request_complete(const struct crt_cb_info *cb_info)
 int
 crt_perf_send_done(const struct crt_perf_info *perf_info, struct crt_perf_context_info *info)
 {
-	size_t ep_rank, ep_tag;
-	int    rc;
+	uint32_t ep_rank, ep_tag;
+	int      rc;
 
-	for (ep_rank = 0; ep_rank < perf_info->ep_rank_max; ep_rank++) {
-		for (ep_tag = 0; ep_tag < perf_info->ep_tag_max; ep_tag++) {
+	for (ep_rank = 0; ep_rank < perf_info->ep_ranks; ep_rank++) {
+		for (ep_tag = 0; ep_tag < perf_info->ep_tags; ep_tag++) {
 			struct crt_perf_request args      = {.expected_count = 1,
 							     .complete_count = 0,
 							     .rc             = 0,
@@ -863,23 +730,18 @@ crt_perf_send_done(const struct crt_perf_info *perf_info, struct crt_perf_contex
 			crt_rpc_t *request;
 
 			rc = crt_req_create(info->context, &target_ep, CRT_PERF_DONE_ID, &request);
-			if (rc != 0) {
-				DL_ERROR(rc, "crt_req_create() failed");
-				goto error;
-			}
+			CRT_PERF_CHECK_D_ERROR(error, rc, "could not create request");
 
 			rc = crt_req_send(request, crt_perf_request_complete, &args);
-			if (rc != 0) {
-				DL_ERROR(rc, "crt_req_send() failed");
-				goto error;
-			}
+			CRT_PERF_CHECK_D_ERROR(error, rc,
+					       "could not send request to %" PRIu32 ":%" PRIu32,
+					       target_ep.ep_rank, target_ep.ep_tag);
 
 			while (!args.done) {
 				rc = crt_progress(info->context, 1000 * 1000);
-				if (rc != 0 && rc != -DER_TIMEDOUT) {
-					DL_ERROR(rc, "crt_progress() failed");
-					goto error;
-				}
+				if (rc == -DER_TIMEDOUT)
+					continue;
+				CRT_PERF_CHECK_D_ERROR(error, rc, "could not make progress");
 			}
 		}
 	}
@@ -888,6 +750,15 @@ crt_perf_send_done(const struct crt_perf_info *perf_info, struct crt_perf_contex
 
 error:
 	return rc;
+}
+
+int
+crt_perf_mpi_init(struct crt_mpi_info *mpi_info)
+{
+	mpi_info->size = 1;
+	mpi_info->rank = 0;
+
+	return 0;
 }
 
 void

@@ -22,9 +22,9 @@ struct crt_perf_opts {
 	char  *comm;
 	char  *domain;
 	char  *protocol;
-	char  *attach_path;
 	char  *hostname;
-	int    port;
+	char  *port;
+	char  *attach_path;
 	size_t msg_size_max;
 	size_t buf_size_min;
 	size_t buf_size_max;
@@ -48,15 +48,14 @@ struct crt_perf_info {
 	struct crt_perf_context_info *context_info;
 	struct crt_mpi_info           mpi_info;
 	crt_group_t                  *ep_group;
-	size_t                        ep_rank_max;
-	size_t                        ep_tag_max;
+	uint32_t                      ep_ranks;
+	uint32_t                      ep_tags;
 };
 
 struct crt_perf_context_info {
 	crt_context_t context;
 	crt_rpc_t   **requests;
 	void         *rpc_buf;
-	void         *rpc_verify_buf;
 	int           context_id;
 	bool          done;
 };
@@ -80,9 +79,27 @@ struct crt_perf_request {
 #define CRT_PERF_BASE_OPC       0x010000000
 #define CRT_PERF_RPC_VERSION    0
 
-#define CRT_PERF_RATE_INIT_ID   CRT_PROTO_OPC(CRT_PERF_BASE_OPC, CRT_PERF_RPC_VERSION, 0)
-#define CRT_PERF_RATE_ID        CRT_PROTO_OPC(CRT_PERF_BASE_OPC, CRT_PERF_RPC_VERSION, 1)
-#define CRT_PERF_DONE_ID        CRT_PROTO_OPC(CRT_PERF_BASE_OPC, CRT_PERF_RPC_VERSION, 2)
+#define CRT_PERF_RATE_ID        CRT_PROTO_OPC(CRT_PERF_BASE_OPC, CRT_PERF_RPC_VERSION, 0)
+#define CRT_PERF_DONE_ID        CRT_PROTO_OPC(CRT_PERF_BASE_OPC, CRT_PERF_RPC_VERSION, 1)
+
+/* Check for D_ ret value and goto label */
+#define CRT_PERF_CHECK_D_ERROR(label, rc, ...)                                                     \
+	do {                                                                                       \
+		if (unlikely(rc != 0)) {                                                           \
+			DL_ERROR(rc, __VA_ARGS__);                                                 \
+			goto label;                                                                \
+		}                                                                                  \
+	} while (0)
+
+/* Check for cond, set ret to err_val and goto label */
+#define CRT_PERF_CHECK_ERROR(cond, label, rc, err_val, ...)                                        \
+	do {                                                                                       \
+		if (unlikely(cond)) {                                                              \
+			rc = err_val;                                                              \
+			DL_ERROR(rc, __VA_ARGS__);                                                 \
+			goto label;                                                                \
+		}                                                                                  \
+	} while (0)
 
 /*********************/
 /* Public Prototypes */
@@ -111,10 +128,13 @@ crt_perf_verify_data(const void *buf, size_t buf_size);
 void
 crt_perf_request_complete(const struct crt_cb_info *cb_info);
 
-void
-crt_perf_barrier(const struct crt_perf_info *perf_info);
-
 int
 crt_perf_send_done(const struct crt_perf_info *perf_info, struct crt_perf_context_info *info);
+
+int
+crt_perf_mpi_init(struct crt_mpi_info *mpi_info);
+
+void
+crt_perf_barrier(const struct crt_perf_info *perf_info);
 
 #endif /* __CRT_PERF_H__ */

@@ -29,10 +29,7 @@ crt_perf_loop_thread(void *arg)
 	(void)crt_perf_loop_thread_set_affinity((struct crt_perf_context_info *)arg);
 
 	rc = crt_perf_loop((struct crt_perf_context_info *)arg);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_perf_loop() failed");
-		goto out;
-	}
+	CRT_PERF_CHECK_D_ERROR(out, rc, "could not run progress loop");
 
 out:
 	return NULL;
@@ -53,12 +50,9 @@ crt_perf_loop_thread_set_affinity(struct crt_perf_context_info *info)
 		goto error;
 	}
 
-	if (info->context_id > CPU_COUNT(&orig_cpu_set)) {
-		rc = -DER_INVAL;
-		DL_ERROR(rc, "Could not set affinity, class ID (%d) > CPU count (%d)",
-			 info->context_id, CPU_COUNT(&orig_cpu_set));
-		goto error;
-	}
+	CRT_PERF_CHECK_ERROR(info->context_id > CPU_COUNT(&orig_cpu_set), error, rc, -DER_INVAL,
+			     "Could not set affinity, class ID (%d) > CPU count (%d)",
+			     info->context_id, CPU_COUNT(&orig_cpu_set));
 
 	CPU_ZERO(&new_cpu_set);
 	for (cpu = 0; cpu < CPU_SETSIZE; cpu++) {
@@ -100,10 +94,10 @@ crt_perf_loop(struct crt_perf_context_info *info)
 
 	do {
 		rc = crt_progress(info->context, 1000 * 1000);
-		if (rc != 0 && rc != -DER_TIMEDOUT) {
-			DL_ERROR(rc, "crt_progress() failed");
-			goto error;
-		}
+		if (rc == -DER_TIMEDOUT)
+			continue;
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not make progress on context %d",
+				       info->context_id);
 	} while (!info->done);
 
 	return 0;
@@ -120,10 +114,7 @@ main(int argc, char **argv)
 	int                  rc;
 
 	rc = crt_perf_init(argc, argv, true, &info);
-	if (rc != 0) {
-		DL_ERROR(rc, "crt_perf_init() failed");
-		goto error;
-	}
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not initialize");
 
 	if (info.mpi_info.rank == 0) {
 		printf("# %d server process(es)\n", info.mpi_info.size);
@@ -135,10 +126,8 @@ main(int argc, char **argv)
 
 		progress_threads =
 		    (pthread_t *)malloc(sizeof(*progress_threads) * info.opts.context_max);
-		if (progress_threads == NULL) {
-			DL_ERROR(-DER_NOMEM, "Could not allocate progress threads");
-			goto error;
-		}
+		CRT_PERF_CHECK_ERROR(progress_threads == NULL, error, rc, -DER_NOMEM,
+				     "could not allocate progress threads");
 
 		for (i = 0; i < info.opts.context_max; i++) {
 			rc = pthread_create(&progress_threads[i], NULL, crt_perf_loop_thread,
@@ -158,10 +147,7 @@ main(int argc, char **argv)
 		}
 	} else {
 		rc = crt_perf_loop(&info.context_info[0]);
-		if (rc != 0) {
-			DL_ERROR(rc, "crt_perf_loop() failed");
-			goto error;
-		}
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not run progress loop");
 	}
 
 	if (info.mpi_info.rank == 0)
