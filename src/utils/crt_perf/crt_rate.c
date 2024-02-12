@@ -21,7 +21,13 @@ crt_perf_run(const struct crt_perf_info *perf_info, struct crt_perf_context_info
 	     size_t buf_size, size_t skip);
 
 static int
-crt_perf_rpc_verify(crt_rpc_t *rpc);
+crt_perf_rpc_verify(crt_rpc_t *rpc, void *arg);
+
+static inline int
+crt_perf_progress_cond_cb(void *arg)
+{
+	return ((struct crt_perf_request *)arg)->done;
+}
 
 static int
 crt_perf_run(const struct crt_perf_info *perf_info, struct crt_perf_context_info *info,
@@ -39,44 +45,57 @@ crt_perf_run(const struct crt_perf_info *perf_info, struct crt_perf_context_info
 		    .complete_count = 0,
 		    .rc             = 0,
 		    .done           = false,
-		    .cb             = (opts->verify && opts->bidir) ? crt_perf_rpc_verify : NULL};
-		crt_endpoint_t target_ep = {
-		    .ep_grp = perf_info->ep_group, .ep_rank = 0, .ep_tag = 0};
+		    .cb             = (opts->verify && opts->bidir) ? crt_perf_rpc_verify : NULL,
+		    .arg            = NULL};
+		bool         aborting = false;
 		unsigned int j;
 
 		if (i == skip) {
 			if (perf_info->mpi_info.size > 1)
-				crt_perf_barrier(perf_info);
+				crt_perf_mpi_barrier(&perf_info->mpi_info);
 			d_gettime(&t1);
 		}
 
 		for (j = 0; j < opts->request_max; j++) {
-			struct iovec *in_iov;
+			struct crt_perf_rpc *request = &info->requests[j];
+			struct iovec        *in_iov;
 
-			rc = crt_req_create(info->context, &target_ep, CRT_PERF_RATE_ID,
-					    &info->requests[j]);
+			rc = crt_req_create(info->context, &request->endpoint,
+					    CRT_PERF_ID(CRT_PERF_RATE), &request->rpc);
 			CRT_PERF_CHECK_D_ERROR(error, rc, "could not create request");
 
-			in_iov           = crt_req_get(info->requests[j]);
+			in_iov           = crt_req_get(request->rpc);
 			in_iov->iov_base = info->rpc_buf;
 			in_iov->iov_len  = buf_size;
 
-			rc = crt_req_send(info->requests[j], crt_perf_request_complete, &args);
+			rc = crt_req_send(request->rpc, crt_perf_request_complete, &args);
 			CRT_PERF_CHECK_D_ERROR(error, rc,
 					       "could not send request to %" PRIu32 ":%" PRIu32,
-					       target_ep.ep_rank, target_ep.ep_tag);
+					       request->endpoint.ep_rank, request->endpoint.ep_tag);
 		}
 
 		while (!args.done) {
-			rc = crt_progress(info->context, 1000 * 1000);
-			if (rc == -DER_TIMEDOUT)
-				continue;
-			CRT_PERF_CHECK_D_ERROR(error, rc, "could not make progress");
+			// rc = crt_progress(info->context, CRT_PERF_TIMEOUT);
+			rc = crt_progress_cond1(info->context, CRT_PERF_TIMEOUT,
+						crt_perf_progress_cond_cb, &args);
+			if (rc == -DER_TIMEDOUT) {
+				if (aborting)
+					continue;
+				for (j = 0; j < opts->request_max; j++) {
+					rc = crt_req_abort(info->requests[j].rpc);
+					CRT_PERF_CHECK_D_ERROR(error, rc,
+							       "could not abort request");
+				}
+				aborting = true;
+			} else
+				CRT_PERF_CHECK_D_ERROR(error, rc, "could not make progress");
 		}
+		if (aborting)
+			return -DER_TIMEDOUT;
 	}
 
 	if (perf_info->mpi_info.size > 1)
-		crt_perf_barrier(perf_info);
+		crt_perf_mpi_barrier(&perf_info->mpi_info);
 
 	d_gettime(&t2);
 
@@ -90,10 +109,12 @@ error:
 }
 
 static int
-crt_perf_rpc_verify(crt_rpc_t *rpc)
+crt_perf_rpc_verify(crt_rpc_t *rpc, void *arg)
 {
 	struct iovec *out_iov;
 	int           rc;
+
+	(void)arg;
 
 	out_iov = crt_reply_get(rpc);
 	CRT_PERF_CHECK_ERROR(out_iov == NULL, error, rc, -DER_INVAL,
@@ -125,6 +146,9 @@ main(int argc, char **argv)
 	/* Allocate RPC buffers */
 	rc = crt_perf_rpc_buf_init(&perf_info, info);
 	CRT_PERF_CHECK_D_ERROR(error, rc, "could not init RPC buffers");
+
+	/* Set RPC requests */
+	crt_perf_rpc_set_req(&perf_info, info);
 
 	/* Header info */
 	if (perf_info.mpi_info.rank == 0)

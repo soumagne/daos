@@ -79,7 +79,7 @@ crt_perf_loop_thread_set_affinity(struct crt_perf_context_info *info)
 	}
 	for (cpu = 0; cpu < CPU_SETSIZE; cpu++)
 		if (CPU_ISSET(cpu, &orig_cpu_set))
-			D_INFO("Class ID %d bound to CPU %zu\n", info->context_id, cpu);
+			printf("Class ID %d bound to CPU %zu\n", info->context_id, cpu);
 
 	return 0;
 
@@ -93,7 +93,7 @@ crt_perf_loop(struct crt_perf_context_info *info)
 	int rc;
 
 	do {
-		rc = crt_progress(info->context, 1000 * 1000);
+		rc = crt_progress1(info->context, CRT_PERF_TIMEOUT);
 		if (rc == -DER_TIMEDOUT)
 			continue;
 		CRT_PERF_CHECK_D_ERROR(error, rc, "could not make progress on context %d",

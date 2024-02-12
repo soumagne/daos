@@ -7,10 +7,9 @@
 #ifndef __CRT_PERF_H__
 #define __CRT_PERF_H__
 
+#include "crt_perf_mpi.h"
+
 #include <cart/api.h>
-#include <gurt/atomic.h>
-#include <gurt/common.h>
-#include <stdio.h>
 
 #include <sys/uio.h>
 
@@ -38,35 +37,38 @@ struct crt_perf_opts {
 	bool   mbps;
 };
 
-struct crt_mpi_info {
-	int rank;
-	int size;
-};
-
 struct crt_perf_info {
 	struct crt_perf_opts          opts;
 	struct crt_perf_context_info *context_info;
-	struct crt_mpi_info           mpi_info;
+	struct crt_perf_mpi_info      mpi_info;
 	crt_group_t                  *ep_group;
 	uint32_t                      ep_ranks;
 	uint32_t                      ep_tags;
 };
 
+struct crt_perf_rpc {
+	crt_endpoint_t endpoint; /* Destination endpoint */
+	crt_rpc_t     *rpc;      /* RPC request */
+};
+
 struct crt_perf_context_info {
-	crt_context_t context;
-	crt_rpc_t   **requests;
-	void         *rpc_buf;
-	int           context_id;
-	bool          done;
+	crt_context_t        context;
+	struct crt_perf_rpc *requests;
+	void                *rpc_buf;
+	int                  context_id;
+	bool                 done;
 };
 
 struct crt_perf_request {
-	int32_t expected_count; /* Expected count */
-	int32_t complete_count; /* Completed count */
-	int     rc;             /* Callback return code */
-	bool    done;           /* Request */
-	int (*cb)(crt_rpc_t *); /* Callback */
+	int32_t expected_count;         /* Expected count */
+	int32_t complete_count;         /* Completed count */
+	int     rc;                     /* Callback return code */
+	bool    done;                   /* Request */
+	int (*cb)(crt_rpc_t *, void *); /* Callback */
+	void *arg;                      /* Callback arg */
 };
+
+enum crt_perf_rpc_id { CRT_PERF_RATE, CRT_PERF_DONE, CRT_PERF_TAGS };
 
 /*****************/
 /* Public Macros */
@@ -76,30 +78,12 @@ struct crt_perf_request {
 #define CRT_PERF_LAT_SKIP_LARGE 10
 #define CRT_PERF_LARGE_SIZE     8192
 
+#define CRT_PERF_TIMEOUT        (1000 * 1000) /* us */
+
 #define CRT_PERF_BASE_OPC       0x010000000
 #define CRT_PERF_RPC_VERSION    0
 
-#define CRT_PERF_RATE_ID        CRT_PROTO_OPC(CRT_PERF_BASE_OPC, CRT_PERF_RPC_VERSION, 0)
-#define CRT_PERF_DONE_ID        CRT_PROTO_OPC(CRT_PERF_BASE_OPC, CRT_PERF_RPC_VERSION, 1)
-
-/* Check for D_ ret value and goto label */
-#define CRT_PERF_CHECK_D_ERROR(label, rc, ...)                                                     \
-	do {                                                                                       \
-		if (unlikely(rc != 0)) {                                                           \
-			DL_ERROR(rc, __VA_ARGS__);                                                 \
-			goto label;                                                                \
-		}                                                                                  \
-	} while (0)
-
-/* Check for cond, set ret to err_val and goto label */
-#define CRT_PERF_CHECK_ERROR(cond, label, rc, err_val, ...)                                        \
-	do {                                                                                       \
-		if (unlikely(cond)) {                                                              \
-			rc = err_val;                                                              \
-			DL_ERROR(rc, __VA_ARGS__);                                                 \
-			goto label;                                                                \
-		}                                                                                  \
-	} while (0)
+#define CRT_PERF_ID(x)          CRT_PROTO_OPC(CRT_PERF_BASE_OPC, CRT_PERF_RPC_VERSION, x)
 
 /*********************/
 /* Public Prototypes */
@@ -113,6 +97,9 @@ crt_perf_cleanup(struct crt_perf_info *info);
 
 int
 crt_perf_rpc_buf_init(const struct crt_perf_info *perf_info, struct crt_perf_context_info *info);
+
+void
+crt_perf_rpc_set_req(const struct crt_perf_info *perf_info, struct crt_perf_context_info *info);
 
 void
 crt_perf_print_header_lat(const struct crt_perf_info         *perf_info,
@@ -130,11 +117,5 @@ crt_perf_request_complete(const struct crt_cb_info *cb_info);
 
 int
 crt_perf_send_done(const struct crt_perf_info *perf_info, struct crt_perf_context_info *info);
-
-int
-crt_perf_mpi_init(struct crt_mpi_info *mpi_info);
-
-void
-crt_perf_barrier(const struct crt_perf_info *perf_info);
 
 #endif /* __CRT_PERF_H__ */

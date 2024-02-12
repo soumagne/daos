@@ -11,11 +11,18 @@ def scons():
 
     tenv = env.Clone()
     tenv.require('mercury')
+    # tenv.Replace(CCFLAGS=['-O0','-g'])
+
+    # tenv.AppendUnique(CCFLAGS=['-fsanitize=address','-fsanitize-address-use-after-scope','-fno-omit-frame-pointer','-fno-optimize-sibling-calls'])
+    # tenv.AppendUnique(LINKFLAGS=['-fsanitize=address'])
+
+    # tenv.AppendUnique(CCFLAGS=['-fsanitize=thread'])
+    # tenv.AppendUnique(LINKFLAGS=['-fsanitize=thread'])
 
     libs = ['cart', 'gurt', 'mercury']
 
-    crt_rate_src = ['crt_rate.c', tenv.Object('crt_perf.c')]
-    crt_perf_server_src = ['crt_perf_server.c', tenv.Object('crt_perf.c')]
+    crt_rate_src = ['crt_rate.c', tenv.Object('crt_perf.c'), tenv.Object('crt_perf_mpi.c')]
+    crt_perf_server_src = ['crt_perf_server.c', tenv.Object('crt_perf.c'), tenv.Object('crt_perf_mpi.c')]
 
     crt_rate = tenv.d_program('crt_rate', crt_rate_src, LIBS=libs)
     crt_perf_server = tenv.d_program('crt_perf_server', crt_perf_server_src, LIBS=libs)

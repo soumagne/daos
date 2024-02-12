@@ -14,6 +14,10 @@
 /* Local Macros */
 /****************/
 
+#ifndef CART_VERSION
+#define CART_VERSION "0.0.0"
+#endif
+
 #define NDIGITS               2
 #define NWIDTH                27
 
@@ -68,17 +72,36 @@ crt_perf_context_init(const struct crt_perf_info *perf_info, int context_id,
 static void
 crt_perf_context_cleanup(struct crt_perf_context_info *info);
 
+static int
+crt_perf_group_save(const struct crt_perf_info *info);
+
+static int
+crt_perf_group_attach(struct crt_perf_info *info);
+
 static void
 crt_perf_init_data(void *buf, size_t buf_size);
 
 static int
 crt_perf_proc_iovec(crt_proc_t proc, void *data);
 
+static int
+crt_perf_proc_tags(crt_proc_t proc, void *data);
+
+static int
+crt_perf_tags_out(crt_rpc_t *rpc, void *arg);
+
 static void
 crt_perf_rpc_rate_cb(crt_rpc_t *rpc);
 
 static void
-		     crt_perf_done_cb(crt_rpc_t *rpc);
+crt_perf_done_cb(crt_rpc_t *rpc);
+
+static void
+crt_perf_tags_cb(crt_rpc_t *rpc);
+
+static int
+crt_perf_send_rpc_wait(crt_context_t context, crt_endpoint_t *target_ep, crt_opcode_t opc,
+		       int (*out_cb)(crt_rpc_t *, void *), void *out_arg);
 
 /*******************/
 /* Local Variables */
@@ -132,6 +155,13 @@ static struct crt_req_format crt_perf_rate_bidir = {
 	.crf_size_out = sizeof(struct iovec)
 };
 
+static struct crt_req_format crt_perf_tags = {
+    .crf_proc_in  = NULL,
+	.crf_proc_out = crt_perf_proc_tags,
+	.crf_size_in  = 0,
+	.crf_size_out = sizeof(uint32_t)
+};
+
 static struct crt_proto_rpc_format crt_perf_rpcs[] = {
     {
         .prf_req_fmt = &crt_perf_rate,
@@ -142,6 +172,12 @@ static struct crt_proto_rpc_format crt_perf_rpcs[] = {
     {
         .prf_req_fmt = &crt_perf_no_arg,
 		.prf_hdlr    = crt_perf_done_cb,
+		.prf_co_ops  = NULL,
+		.prf_flags   = 0
+    },
+    {
+        .prf_req_fmt = &crt_perf_tags,
+		.prf_hdlr    = crt_perf_tags_cb,
 		.prf_co_ops  = NULL,
 		.prf_flags   = 0
     }
@@ -376,6 +412,95 @@ crt_perf_context_cleanup(struct crt_perf_context_info *info)
 	}
 }
 
+static int
+crt_perf_group_save(const struct crt_perf_info *info)
+{
+	char *uri_list = NULL;
+	int   rc;
+
+	if (info->mpi_info.size > 1) {
+		char  uri_name[128];
+		char *uri;
+		int   rank;
+
+		rc = crt_self_uri_get(0, &uri);
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not get self uri");
+		memset(uri_name, '\0', sizeof(uri_name));
+		strcpy(uri_name, uri);
+		free(uri);
+
+		uri_list = malloc(sizeof(uri_name) * info->mpi_info.size);
+		CRT_PERF_CHECK_ERROR(uri_list == NULL, error, rc, -DER_NOMEM,
+				     "could not allocate array of size %zu",
+				     sizeof(uri_name) * info->mpi_info.size);
+
+		rc = crt_perf_mpi_allgather(&info->mpi_info, uri_name, sizeof(uri_name), uri_list,
+					    sizeof(uri_name));
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not allgather uris");
+
+		for (rank = 0; rank < info->mpi_info.size; rank++) {
+			char *rank_uri = uri_list + rank * sizeof(uri_name);
+
+			if (rank == info->mpi_info.rank)
+				continue; /* our rank is already added */
+
+			rc = crt_group_primary_rank_add(info->context_info[0].context, NULL, rank,
+							rank_uri);
+			CRT_PERF_CHECK_D_ERROR(error, rc, "could not add rank %d %s", rank,
+					       rank_uri);
+		}
+	}
+
+	if (info->mpi_info.rank == 0) {
+		rc = crt_group_config_save(NULL, true);
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not save group config");
+	}
+
+	free(uri_list);
+
+	return 0;
+
+error:
+	free(uri_list);
+
+	return rc;
+}
+
+static int
+crt_perf_group_attach(struct crt_perf_info *info)
+{
+	int rc;
+
+	rc = crt_group_attach(CRT_PERF_GROUP_ID, &info->ep_group);
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not attach to group %s", CRT_PERF_GROUP_ID);
+
+	rc = crt_group_size(info->ep_group, &info->ep_ranks);
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not query group size");
+	CRT_PERF_CHECK_ERROR(info->ep_ranks == 0, error, rc, -DER_INVAL, "ep ranks cannot be zero");
+
+	if (info->mpi_info.rank == 0) {
+		crt_endpoint_t target_ep = {.ep_grp = info->ep_group, .ep_rank = 0, .ep_tag = 0};
+		rc = crt_perf_send_rpc_wait(info->context_info[0].context, &target_ep,
+					    CRT_PERF_ID(CRT_PERF_TAGS), crt_perf_tags_out,
+					    &info->ep_tags);
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not query tags");
+		CRT_PERF_CHECK_ERROR(info->ep_tags == 0, error, rc, -DER_INVAL,
+				     "ep tags cannot be zero");
+
+		printf("# %" PRIu32 " target rank(s) read - %" PRIu32 " tag(s)\n", info->ep_ranks,
+		       info->ep_tags);
+	}
+	if (info->mpi_info.size > 1) {
+		rc = crt_perf_mpi_bcast(&info->mpi_info, &info->ep_tags, sizeof(info->ep_tags), 0);
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not bcast ep_tags");
+	}
+
+	return 0;
+
+error:
+	return rc;
+}
+
 static void
 crt_perf_init_data(void *buf, size_t buf_size)
 {
@@ -424,6 +549,48 @@ crt_perf_proc_iovec(crt_proc_t proc, void *data)
 		rc = crt_proc_memcpy(proc, proc_op, iov->iov_base, iov->iov_len);
 		CRT_PERF_CHECK_D_ERROR(error, rc, "could not proc memcpy");
 	}
+
+	return 0;
+
+error:
+	return rc;
+}
+
+static int
+crt_perf_proc_tags(crt_proc_t proc, void *data)
+{
+	uint32_t     *tags = (uint32_t *)data;
+	crt_proc_op_t proc_op;
+	int           rc;
+
+	CRT_PERF_CHECK_ERROR(proc == NULL || tags == NULL, error, rc, -DER_INVAL, "NULL arguments");
+
+	rc = crt_proc_get_op(proc, &proc_op);
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not get proc op");
+
+	if (FREEING(proc_op))
+		return 0;
+
+	rc = crt_proc_uint32_t(proc, proc_op, tags);
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not proc tags");
+
+	return 0;
+
+error:
+	return rc;
+}
+
+static int
+crt_perf_tags_out(crt_rpc_t *rpc, void *arg)
+{
+	uint32_t *tags;
+	int       rc;
+
+	tags = crt_reply_get(rpc);
+	CRT_PERF_CHECK_ERROR(tags == NULL, error, rc, -DER_INVAL,
+			     "could not retrieve rpc response");
+
+	*(uint32_t *)arg = *tags;
 
 	return 0;
 
@@ -494,6 +661,60 @@ error:
 	return;
 }
 
+static void
+crt_perf_tags_cb(crt_rpc_t *rpc)
+{
+	uint32_t *tags_p;
+	int       rc;
+
+	tags_p = (uint32_t *)crt_reply_get(rpc);
+	CRT_PERF_CHECK_ERROR(tags_p == NULL, error, rc, -DER_INVAL,
+			     "could not retrieve rpc response");
+	*tags_p = (uint32_t)perf_info_g->opts.context_max;
+
+	/* Send response back */
+	rc = crt_reply_send(rpc);
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not send response");
+
+	return;
+
+error:
+	return;
+}
+
+static int
+crt_perf_send_rpc_wait(crt_context_t context, crt_endpoint_t *target_ep, crt_opcode_t opc,
+		       int (*out_cb)(crt_rpc_t *, void *), void *out_arg)
+{
+	struct crt_perf_request args = {.expected_count = 1,
+					.complete_count = 0,
+					.rc             = 0,
+					.done           = false,
+					.cb             = out_cb,
+					.arg            = out_arg};
+	crt_rpc_t              *request;
+	int                     rc;
+
+	rc = crt_req_create(context, target_ep, opc, &request);
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not create request");
+
+	rc = crt_req_send(request, crt_perf_request_complete, &args);
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not send request to %" PRIu32 ":%" PRIu32,
+			       target_ep->ep_rank, target_ep->ep_tag);
+
+	while (!args.done) {
+		rc = crt_progress(context, CRT_PERF_TIMEOUT);
+		if (rc == -DER_TIMEDOUT)
+			continue;
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not make progress");
+	}
+
+	return 0;
+
+error:
+	return rc;
+}
+
 int
 crt_perf_init(int argc, char *argv[], bool listen, struct crt_perf_info *info)
 {
@@ -511,7 +732,8 @@ crt_perf_init(int argc, char *argv[], bool listen, struct crt_perf_info *info)
 	CRT_PERF_CHECK_D_ERROR(error, rc, "could not init log");
 
 	/* Init MPI (if available) */
-	crt_perf_mpi_init(&info->mpi_info);
+	rc = crt_perf_mpi_init(&info->mpi_info);
+	CRT_PERF_CHECK_D_ERROR(error, rc, "could not initialize MPI");
 
 	/* Parse user options */
 	crt_perf_parse_options(argc, argv, &info->opts);
@@ -521,16 +743,21 @@ crt_perf_init(int argc, char *argv[], bool listen, struct crt_perf_info *info)
 	crt_init_options.cio_interface = info->opts.hostname;
 	crt_init_options.cio_domain    = info->opts.domain;
 	crt_init_options.cio_port      = info->opts.port;
+	crt_init_options.cio_busy_wait = info->opts.busy_wait;
 	if (info->opts.msg_size_max) {
 		crt_init_options.cio_max_expected_size   = info->opts.msg_size_max;
 		crt_init_options.cio_max_unexpected_size = info->opts.msg_size_max;
 		crt_init_options.cio_use_expected_size   = true;
 		crt_init_options.cio_use_unexpected_size = true;
 	}
+	if (info->mpi_info.rank == 0) {
+		if (info->opts.busy_wait)
+			printf("# Initializing CRT in busy wait mode\n");
+	}
 
 	if (listen)
 		crt_init_flags |= CRT_FLAG_BIT_SERVER | CRT_FLAG_BIT_AUTO_SWIM_DISABLE;
-	rc = crt_init_opt(CRT_PERF_GROUP_ID, crt_init_flags, &crt_init_options);
+	rc = crt_init_opt(listen ? CRT_PERF_GROUP_ID : NULL, crt_init_flags, &crt_init_options);
 	CRT_PERF_CHECK_D_ERROR(error, rc, "could not init CART");
 
 	if (attach_info_path) {
@@ -564,18 +791,11 @@ crt_perf_init(int argc, char *argv[], bool listen, struct crt_perf_info *info)
 	}
 
 	if (listen) {
-		rc = crt_group_config_save(NULL, true);
-		CRT_PERF_CHECK_D_ERROR(error, rc, "could not save group config");
+		rc = crt_perf_group_save(info);
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not save group info");
 	} else {
-		rc = crt_group_attach(CRT_PERF_GROUP_ID, &info->ep_group);
-		CRT_PERF_CHECK_D_ERROR(error, rc, "could not attach to group %s",
-				       CRT_PERF_GROUP_ID);
-
-		rc = crt_group_size(info->ep_group, &info->ep_ranks);
-		CRT_PERF_CHECK_D_ERROR(error, rc, "could not query group size");
-		printf("# %" PRIu32 " target rank(s) read:\n", info->ep_ranks);
-
-		info->ep_tags = 1;
+		rc = crt_perf_group_attach(info);
+		CRT_PERF_CHECK_D_ERROR(error, rc, "could not attach to server group");
 	}
 
 	perf_info_g = info;
@@ -607,9 +827,31 @@ crt_perf_cleanup(struct crt_perf_info *info)
 
 	crt_perf_free_options(&info->opts);
 
+	crt_perf_mpi_finalize(&info->mpi_info);
+
 	d_log_fini();
 
 	perf_info_g = NULL;
+}
+
+void
+crt_perf_rpc_set_req(const struct crt_perf_info *perf_info, struct crt_perf_context_info *info)
+{
+	size_t comm_rank = (size_t)perf_info->mpi_info.rank,
+	       comm_size = (size_t)perf_info->mpi_info.size;
+	size_t i;
+
+	for (i = 0; i < perf_info->opts.request_max; i++) {
+		crt_endpoint_t *endpoint          = &info->requests[i].endpoint;
+		size_t          request_global_id = comm_rank + i * comm_size;
+
+		*endpoint = (crt_endpoint_t){.ep_grp  = perf_info->ep_group,
+					     .ep_rank = (request_global_id / perf_info->ep_tags) %
+							perf_info->ep_ranks,
+					     .ep_tag = (request_global_id % perf_info->ep_tags)};
+
+		D_INFO("Sending to %d:%d\n", endpoint->ep_rank, endpoint->ep_tag);
+	}
 }
 
 int
@@ -704,7 +946,7 @@ crt_perf_request_complete(const struct crt_cb_info *cb_info)
 			     "callback failed");
 
 	if (info->cb) {
-		info->rc = info->cb(cb_info->cci_rpc);
+		info->rc = info->cb(cb_info->cci_rpc, info->arg);
 	}
 
 out:
@@ -720,29 +962,12 @@ crt_perf_send_done(const struct crt_perf_info *perf_info, struct crt_perf_contex
 
 	for (ep_rank = 0; ep_rank < perf_info->ep_ranks; ep_rank++) {
 		for (ep_tag = 0; ep_tag < perf_info->ep_tags; ep_tag++) {
-			struct crt_perf_request args      = {.expected_count = 1,
-							     .complete_count = 0,
-							     .rc             = 0,
-							     .done           = false,
-							     .cb             = NULL};
-			crt_endpoint_t          target_ep = {
-				     .ep_grp = perf_info->ep_group, .ep_rank = ep_rank, .ep_tag = ep_tag};
-			crt_rpc_t *request;
+			crt_endpoint_t target_ep = {
+			    .ep_grp = perf_info->ep_group, .ep_rank = ep_rank, .ep_tag = ep_tag};
 
-			rc = crt_req_create(info->context, &target_ep, CRT_PERF_DONE_ID, &request);
-			CRT_PERF_CHECK_D_ERROR(error, rc, "could not create request");
-
-			rc = crt_req_send(request, crt_perf_request_complete, &args);
-			CRT_PERF_CHECK_D_ERROR(error, rc,
-					       "could not send request to %" PRIu32 ":%" PRIu32,
-					       target_ep.ep_rank, target_ep.ep_tag);
-
-			while (!args.done) {
-				rc = crt_progress(info->context, 1000 * 1000);
-				if (rc == -DER_TIMEDOUT)
-					continue;
-				CRT_PERF_CHECK_D_ERROR(error, rc, "could not make progress");
-			}
+			rc = crt_perf_send_rpc_wait(info->context, &target_ep,
+						    CRT_PERF_ID(CRT_PERF_DONE), NULL, NULL);
+			CRT_PERF_CHECK_D_ERROR(error, rc, "could not send rpc");
 		}
 	}
 
@@ -750,18 +975,4 @@ crt_perf_send_done(const struct crt_perf_info *perf_info, struct crt_perf_contex
 
 error:
 	return rc;
-}
-
-int
-crt_perf_mpi_init(struct crt_mpi_info *mpi_info)
-{
-	mpi_info->size = 1;
-	mpi_info->rank = 0;
-
-	return 0;
-}
-
-void
-crt_perf_barrier(const struct crt_perf_info *perf_info)
-{
 }
